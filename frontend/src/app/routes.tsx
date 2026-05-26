@@ -11,6 +11,7 @@ import { HistoryPage } from '../features/transactions/HistoryPage';
 import { ProfilePage } from '../features/profile/ProfilePage';
 import { AdminPage } from '../features/admin/AdminPage';
 import { NotificationsPage } from '../features/notifications/NotificationsPage';
+import { ServicesPage } from '../features/services/ServicesPage';
 import { Layout } from '../shared/components/Layout/Layout';
 import { ProtectedRoute } from '../shared/components/ProtectedRoute';
 
@@ -27,12 +28,13 @@ export function AppRoutes() {
             <Route path="/transactions" element={<HistoryPage />} />
             <Route path="/notifications" element={<NotificationsPage />} />
             <Route path="/profile" element={<ProfilePage />} />
-            <Route path="/admin" element={<AdminPage />} />
+            <Route path="/services" element={<ServicesPage />} />
+            <Route path="/transfer" element={<TransferPage />} />
+            <Route path="/topup" element={<TopupPage />} />
+            <Route path="/withdraw" element={<WithdrawPage />} />
+            <Route path="/qr-payment" element={<QrPaymentPage />} />
           </Route>
-          <Route path="/transfer" element={<TransferPage />} />
-          <Route path="/topup" element={<TopupPage />} />
-          <Route path="/withdraw" element={<WithdrawPage />} />
-          <Route path="/qr-payment" element={<QrPaymentPage />} />
+          <Route path="/admin" element={<AdminPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

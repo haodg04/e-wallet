@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { User, UserSchema } from '../users/schemas/user.schema';
 import { Transaction, TransactionSchema } from '../transactions/schemas/transaction.schema';
 import { TransactionsModule } from '../transactions/transactions.module';
+import { BankModule } from '../bank/bank.module';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 
@@ -13,6 +14,7 @@ import { AdminService } from './admin.service';
       { name: Transaction.name, schema: TransactionSchema },
     ]),
     TransactionsModule,
+    BankModule,
   ],
   controllers: [AdminController],
   providers: [AdminService],

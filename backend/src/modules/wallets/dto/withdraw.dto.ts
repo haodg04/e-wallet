@@ -12,4 +12,9 @@ export class WithdrawDto {
   @IsOptional()
   @IsString()
   bankAccountId?: string;
+
+  @ApiPropertyOptional({ description: 'OTP code for transaction verification' })
+  @IsOptional()
+  @IsString()
+  otpCode?: string;
 }

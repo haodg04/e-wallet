@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { IconHome, IconHistory, IconQr, IconUser, IconBell } from '../ui/Icons';
+import { IconHome, IconHistory, IconQr, IconUser, IconGrid } from '../ui/Icons';
 import styles from './BottomNav.module.css';
 
 export function BottomNav() {
@@ -13,12 +13,13 @@ export function BottomNav() {
         <IconHistory size={22} />
         Lịch sử
       </NavLink>
-      <NavLink to="/qr-payment" className={({ isActive }) => `${styles.qrFab} ${isActive ? styles.active : ''}`}>
-        <IconQr size={26} />
+      <NavLink to="/qr-payment" className={({ isActive }) => `${styles.link} ${isActive ? styles.active : ''}`}>
+        <IconQr size={22} />
+        QR
       </NavLink>
-      <NavLink to="/notifications" className={({ isActive }) => `${styles.link} ${isActive ? styles.active : ''}`}>
-        <IconBell size={22} />
-        Thông báo
+      <NavLink to="/services" className={({ isActive }) => `${styles.link} ${isActive ? styles.active : ''}`}>
+        <IconGrid size={22} />
+        Dịch vụ
       </NavLink>
       <NavLink to="/profile" className={({ isActive }) => `${styles.link} ${isActive ? styles.active : ''}`}>
         <IconUser size={22} />

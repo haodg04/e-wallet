@@ -18,3 +18,21 @@
   position: sticky;
   bottom: 0;
 }
+
+@media (min-width: 1024px) {
+  .shell {
+    max-width: 900px;
+    margin: 20px auto 30px;
+    border-radius: 20px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    background: #FFFFFF;
+    min-height: auto;
+    border: 1px solid #E2E8F0;
+    overflow: hidden;
+  }
+  
+  .footer {
+    border-radius: 0 0 20px 20px;
+    position: static;
+  }
+}

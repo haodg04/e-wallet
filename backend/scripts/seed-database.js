@@ -46,8 +46,32 @@ const WalletSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+const BankAccountSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    bankCode: { type: String, required: true },
+    bankName: { type: String, required: true },
+    accountNumber: { type: String, required: true },
+    accountName: { type: String, required: true },
+    isVerified: { type: Boolean, default: false },
+    isActive: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
+
 const User = mongoose.model('User', UserSchema);
 const Wallet = mongoose.model('Wallet', WalletSchema);
+const BankAccount = mongoose.model('BankAccount', BankAccountSchema);
+
+const COOKIE_SECRET = process.env.COOKIE_SECRET || 'dev-key';
+const key = crypto.scryptSync(COOKIE_SECRET, 'salt', 32);
+
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-ctr', key, iv);
+  const encrypted = Buffer.concat([cipher.update(text), cipher.final()]);
+  return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+}
 
 const SEED_USERS = [
   {
@@ -83,6 +107,7 @@ async function seed() {
 
   await User.deleteMany({});
   await Wallet.deleteMany({});
+  await BankAccount.deleteMany({});
 
   for (const u of SEED_USERS) {
     const { balance, password, ...info } = u;
@@ -99,8 +124,33 @@ async function seed() {
       balance,
     });
 
+    let bankCode, bankName, accountNumber;
+    if (u.role === 'admin') {
+      bankCode = 'BIDV';
+      bankName = 'BIDV';
+      accountNumber = '111122223333';
+    } else if (u.fullName === 'User A') {
+      bankCode = 'VCB';
+      bankName = 'Vietcombank';
+      accountNumber = '0123456789';
+    } else {
+      bankCode = 'TCB';
+      bankName = 'Techcombank';
+      accountNumber = '9876543210';
+    }
+
+    await BankAccount.create({
+      userId: user._id,
+      bankCode,
+      bankName,
+      accountNumber: encrypt(accountNumber),
+      accountName: u.fullName.toUpperCase(),
+      isVerified: true,
+      isActive: true,
+    });
+
     console.log(
-      `OK ${info.email} (${info.role}) balance ${balance.toLocaleString('vi-VN')} VND`,
+      `OK ${info.email} (${info.role}) balance ${balance.toLocaleString('vi-VN')} VND with bank account ${bankCode}`,
     );
   }
 

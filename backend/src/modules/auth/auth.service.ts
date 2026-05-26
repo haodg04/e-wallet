@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import * as bcrypt from 'bcrypt';
 import { Connection, Model } from 'mongoose';
+import { createCipheriv, randomBytes, scryptSync } from 'crypto';
 import { BusinessException } from '../../common/exceptions/business.exception';
 import { ErrorCodes } from '../../common/constants/error-codes';
 import { RedisService } from '../../common/redis/redis.service';
@@ -11,6 +12,7 @@ import { MailerService } from '../../common/mailer/mailer.service';
 import { Wallet, WalletDocument } from '../wallets/schemas/wallet.schema';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { OtpRecord, OtpRecordDocument } from './schemas/otp-record.schema';
+import { BankAccount, BankAccountDocument } from '../bank/schemas/bank-account.schema';
 import { RegisterDto } from './dto/register.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -25,16 +27,26 @@ type OtpSendResult = { message: string; devOtp?: string; emailSent?: boolean };
 
 @Injectable()
 export class AuthService {
+  private readonly key = scryptSync(process.env.COOKIE_SECRET || 'dev-key', 'salt', 32);
+
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectModel(Wallet.name) private walletModel: Model<WalletDocument>,
     @InjectModel(OtpRecord.name) private otpModel: Model<OtpRecordDocument>,
+    @InjectModel(BankAccount.name) private bankModel: Model<BankAccountDocument>,
     @InjectConnection() private connection: Connection,
     private jwtService: JwtService,
     private configService: ConfigService,
     private redisService: RedisService,
     private mailerService: MailerService,
   ) {}
+
+  private encrypt(text: string): string {
+    const iv = randomBytes(16);
+    const cipher = createCipheriv('aes-256-ctr', this.key, iv);
+    const encrypted = Buffer.concat([cipher.update(text), cipher.final()]);
+    return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+  }
 
   async validateUser(email: string, password: string): Promise<UserDocument | null> {
     const user = await this.userModel.findOne({ email: email.toLowerCase() }).select('+passwordHash');
@@ -65,6 +77,23 @@ export class AuthService {
         { session },
       );
       await this.walletModel.create([{ userId: user._id, balance: 0 }], { session });
+      
+      // Auto link a default card for the newly registered user
+      await this.bankModel.create(
+        [
+          {
+            userId: user._id,
+            bankCode: 'VCB',
+            bankName: 'Vietcombank',
+            accountNumber: this.encrypt('0123456789'),
+            accountName: dto.fullName.toUpperCase(),
+            isVerified: true,
+            isActive: true,
+          },
+        ],
+        { session },
+      );
+
       await session.commitTransaction();
       const otp = await this.sendOtp(user, 'email_verify');
       return {
@@ -145,22 +174,22 @@ export class AuthService {
     return { message: 'Xác thực OTP giao dịch thành công', expiresInSeconds: TX_OTP_REDIS_TTL };
   }
 
-  async assertTransactionOtp(userId: string, amount: number, otpCode?: string) {
-    if (amount < TX_OTP_THRESHOLD) return;
-
+  async assertTransactionOtp(userId: string, amount: number, threshold = TX_OTP_THRESHOLD, otpCode?: string) {
     if (otpCode) {
       await this.verifyTransactionOtp(userId, otpCode);
       return;
     }
 
-    const verified = await this.redisService.get(`txotp:${userId}`);
-    if (!verified) {
-      throw new BusinessException(
-        'Giao dịch từ 5.000.000đ cần xác thực OTP. Vui lòng gửi và nhập mã OTP.',
-        ErrorCodes.INVALID_OTP,
-      );
+    if (amount >= threshold) {
+      const verified = await this.redisService.get(`txotp:${userId}`);
+      if (!verified) {
+        throw new BusinessException(
+          `Giao dịch từ ${threshold.toLocaleString('vi-VN')}đ cần xác thực OTP. Vui lòng gửi và nhập mã OTP.`,
+          ErrorCodes.INVALID_OTP,
+        );
+      }
+      await this.redisService.del(`txotp:${userId}`);
     }
-    await this.redisService.del(`txotp:${userId}`);
   }
 
   async login(user: UserDocument) {
@@ -284,6 +313,16 @@ export class AuthService {
     });
 
     const isDev = this.configService.get('NODE_ENV') !== 'production';
+    const emailHost = this.configService.get<string>('EMAIL_HOST');
+
+    if (!result.sent && emailHost) {
+      throw new BusinessException(
+        'Không thể gửi email OTP. Vui lòng kiểm tra lại cấu hình Email/SMTP trong tệp .env.',
+        ErrorCodes.INTERNAL_SERVER_ERROR,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+
     if (!result.sent) {
       // eslint-disable-next-line no-console
       console.log(`[OTP] ${user.email} (${type}): ${code}`);

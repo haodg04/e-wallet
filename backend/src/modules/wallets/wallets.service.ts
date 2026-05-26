@@ -17,6 +17,8 @@ import { TransferDto } from './dto/transfer.dto';
 import { NotificationGateway } from '../../gateways/notification.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthService } from '../auth/auth.service';
+import { BankService } from '../bank/bank.service';
+import { MailerService } from '../../common/mailer/mailer.service';
 
 @Injectable()
 export class WalletsService {
@@ -29,6 +31,8 @@ export class WalletsService {
     private notificationGateway: NotificationGateway,
     private notificationsService: NotificationsService,
     private authService: AuthService,
+    private bankService: BankService,
+    private mailerService: MailerService,
   ) {}
 
   async getWalletByUserId(userId: string) {
@@ -48,6 +52,17 @@ export class WalletsService {
     };
   }
 
+  async resolveWalletRecipient(recipient: string): Promise<{ fullName: string; email: string }> {
+    const user = await this.userModel.findOne({
+      $or: [{ email: recipient.toLowerCase() }, { phone: recipient }],
+      isActive: true,
+    });
+    if (!user) {
+      throw new BusinessException('Người nhận không tồn tại trong hệ thống', ErrorCodes.NOT_FOUND, HttpStatus.NOT_FOUND);
+    }
+    return { fullName: user.fullName, email: user.email };
+  }
+
   async transfer(
     userId: string,
     walletId: string,
@@ -59,7 +74,17 @@ export class WalletsService {
       if (cached) return JSON.parse(cached);
     }
 
-    await this.authService.assertTransactionOtp(userId, dto.amount, dto.otpCode);
+    // Check bank account constraint
+    const hasBankAccount = await this.bankService.hasActiveBankAccount(userId);
+    if (!hasBankAccount) {
+      throw new BusinessException(
+        'Bạn cần liên kết tài khoản ngân hàng trước khi thực hiện chuyển tiền. Vui lòng vào Cá nhân > Liên kết ngân hàng.',
+        ErrorCodes.VALIDATION_ERROR,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    await this.authService.assertTransactionOtp(userId, dto.amount, 500000, dto.otpCode);
 
     const fromWallet = await this.walletModel.findOne({
       _id: walletId,
@@ -68,6 +93,12 @@ export class WalletsService {
     });
     if (!fromWallet) {
       throw new BusinessException('Không tìm thấy ví', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
+    }
+
+    // Get sender info
+    const senderUser = await this.userModel.findById(userId);
+    if (!senderUser) {
+      throw new BusinessException('Người dùng không tồn tại', ErrorCodes.NOT_FOUND, HttpStatus.NOT_FOUND);
     }
 
     const recipientUser = await this.userModel.findOne({
@@ -150,9 +181,33 @@ export class WalletsService {
       await this.notificationsService.create(
         recipientUser._id.toString(),
         'Nhận tiền',
-        `Bạn nhận được ${dto.amount.toLocaleString('vi-VN')}đ từ ${fromWallet.userId}`,
+        `Bạn nhận được ${dto.amount.toLocaleString('vi-VN')}đ từ ${senderUser.fullName}`,
         'transfer',
       );
+
+      // Send email receipts (non-blocking)
+      void this.mailerService.sendTransactionEmail({
+        to: senderUser.email,
+        type: 'transfer_out',
+        amount: dto.amount,
+        reference,
+        recipientName: recipientUser.fullName,
+        recipientEmail: recipientUser.email,
+        description: dto.description,
+        newBalance: updatedFrom?.balance,
+        date: new Date(),
+      });
+      void this.mailerService.sendTransactionEmail({
+        to: recipientUser.email,
+        type: 'transfer_in',
+        amount: dto.amount,
+        reference,
+        senderName: senderUser.fullName,
+        senderEmail: senderUser.email,
+        description: dto.description,
+        newBalance: updatedTo?.balance,
+        date: new Date(),
+      });
     } catch (error) {
       await session.abortTransaction();
       throw error;

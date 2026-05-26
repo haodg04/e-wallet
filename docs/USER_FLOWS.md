@@ -1,61 +1,248 @@
-# Thiết kế luồng người dùng (User Flows)
+# User Flows — HKi Wallet
 
-Tập trung vào các luồng chính cho MVP: đăng ký/login, nạp, chuyển, rút, xem lịch sử.
-
-## 1. Luồng đăng ký & xác thực
-1. Người dùng mở `Đăng ký` → nhập email, mật khẩu, tên
-2. Hệ thống tạo user (status=PENDING)
-3. Gửi OTP xác thực vào email/ SMS (lưu code vào Redis TTL 5 phút)
-4. Người dùng nhập OTP → verify → kích hoạt tài khoản
-5. Hệ thống trả về access token + refresh token (httpOnly cookie)
-
-## 2. Luồng đăng nhập
-1. Người dùng mở `Đăng nhập` → nhập email + mật khẩu
-2. Hệ thống xác thực → trả access token + refresh token
-3. Nếu phát hiện thiết bị lạ → yêu cầu OTP
-
-## 3. Luồng xem số dư & lịch sử
-1. Người dùng đăng nhập → vào Dashboard
-2. Frontend gọi `GET /wallets` và `GET /transactions/history`
-3. Hiển thị thẻ số dư, danh sách giao dịch (mới nhất lên đầu)
-4. Socket.IO kết nối để nhận sự kiện `balance:updated` và `transaction:created`
-
-## 4. Luồng chuyển tiền (P2P)
-1. Người gửi mở `Chuyển tiền` → chọn ví nguồn, nhập email/phone người nhận hoặc scan QR
-2. Nhập số tiền, mô tả, xác nhận
-3. Hệ thống yêu cầu OTP giao dịch (nếu vượt ngưỡng hoặc policy)
-4. Verify OTP → Backend bắt đầu transaction: chạy trong transaction session (MongoDB)
-   - Kiểm tra số dư
-   - Ghi transaction với status=PENDING
-   - Trừ số dư gửi vào hold hoặc trực tiếp trừ
-   - Cộng số dư người nhận
-   - Cập nhật status=SUCCESS và ghi audit log
-5. Emit sự kiện Socket.IO cho cả sender & receiver
-6. Trả response cho client với transaction_id
-
-## 5. Luồng nạp tiền (Deposit)
-1. Người dùng chọn `Nạp tiền` → chọn bank/truy cập thông tin chuyển khoản
-2. Hệ thống tạo deposit request với payment_reference (PENDING)
-3. Người dùng chuyển khoản từ ngân hàng ngoài, dùng payment_reference
-4. Bank gửi webhook xác nhận thanh toán
-5. Backend nhận webhook → verify amount & reference → cập nhật wallet và transaction status=SUCCESS → emit notification
-
-## 6. Luồng rút tiền (Withdraw)
-1. Người dùng chọn `Rút tiền` → chọn bank đã liên kết, nhập số tiền
-2. Hệ thống validate balance & tạo withdrawal request (PENDING)
-3. Admin kiểm tra & approve (thời gian đầu có thể tự động approve)
-4. Sau khi approve → hệ thống call bank API hoặc tạo batch payout → cập nhật status
-5. Notify user
-
-## 7. Luồng quản trị (Admin)
-1. Admin login → access `/admin`
-2. Xem danh sách giao dịch PENDING → filter theo type
-3. Mở chi tiết giao dịch → approve/reject với note
-4. Hệ thống gửi thông báo cho user liên quan
+Chi tiết các luồng người dùng đã được triển khai trong hệ thống.
 
 ---
 
-## Notes
-- Tất cả luồng giao dịch quan trọng phải có audit log
-- Dùng Redis cho OTP, rate-limit và queue chỉ định background job xử lý payout
-- Sử dụng Socket.IO rooms theo `user:<userId>` để gửi thông báo riêng
+## 1. Đăng Ký & Xác Thực Email
+
+```
+[Nhập form] → [POST /auth/register] → [Tạo user + ví]
+     ↓
+[Gửi OTP email] → [Nhập OTP 6 số] → [POST /auth/verify-otp]
+     ↓
+[isVerified = true] → [Redirect đăng nhập]
+```
+
+**Chi tiết:**
+- OTP 6 chữ số, hiệu lực 10 phút, lưu MongoDB
+- Nếu SMTP chưa config → trả `devOtp` trong response (dev mode)
+- Email template: gradient xanh dương, OTP box 42px
+- OTP Modal: 6 ô tách biệt, auto-focus, paste support
+
+---
+
+## 2. Đăng Nhập
+
+```
+[Email + Password] → [POST /auth/login]
+     ↓
+[JWT Access Token 15m] + [Refresh Token 7d → Redis]
+     ↓
+[Lưu localStorage] → [Dashboard]
+```
+
+---
+
+## 3. Nạp Tiền (Deposit)
+
+```
+Step 1: Nhập số tiền (≥10K, ≤50M) + chọn quick amount
+     ↓
+[POST /transactions/deposit] → [Tạo TX PENDING + paymentCode]
+     ↓
+Step 2: Hiển thị bank info + QR chuyển khoản
+        Countdown 15 phút
+     ↓
+[Người dùng chuyển khoản thực]
+     ↓
+[POST /transactions/webhooks/payment] (webhook confirm)
+     ↓
+[Cộng số dư ví] + [TX → SUCCESS] + [Notification]
+     ↓
+Step 3: Thành công
+```
+
+**Chi tiết:**
+- Idempotency key: chống duplicate webhook qua Redis
+- Socket.IO emit `balance:updated` sau khi cộng tiền
+- Email: không gửi email cho flow này
+
+---
+
+## 4. Chuyển Tiền — Ví HKi (P2P Transfer)
+
+```
+Step 1: Nhập email/SĐT người nhận + số tiền + lời nhắn
+     ↓
+Step 2: Xác nhận thông tin
+     ↓
+[Nếu ≥ 500.000đ] → OTP Modal → Nhập OTP
+     ↓
+[POST /wallets/:id/transfers] (kèm Idempotency-Key header)
+     ↓
+[MongoDB Transaction: trừ sender + cộng receiver]
+     ↓
+Step 3: Thành công + mã reference
+```
+
+**OTP Flow:**
+1. Click "Xác nhận & OTP" → `POST /auth/transaction-otp/send`
+2. Backend: lưu OTP vào MongoDB (TTL 10 phút), gửi email gradient xanh lá
+3. Frontend: OTP Modal 6 ô, countdown 2 phút
+4. `POST /auth/transaction-otp/verify` → lưu Redis `txotp:{userId}` 5 phút
+5. Execute transfer (backend kiểm tra Redis key)
+
+---
+
+## 5. Chuyển Tiền — Ngân Hàng (Bank Transfer)
+
+```
+Step 1: Chọn tài khoản đã lưu HOẶC nhập ngân hàng + STK mới
+        Nhập số tiền + nội dung
+     ↓
+Step 2: Xác nhận (bank name, STK, chủ TK, số tiền, phí)
+     ↓
+[Nếu ≥ 500.000đ] → OTP Modal → Nhập OTP
+     ↓
+[POST /transactions/bank-transfer]
+     ↓
+[TX → PROCESSING] (1–2 ngày làm việc)
+     ↓
+Step 3: Thành công (đang xử lý)
+```
+
+---
+
+## 6. Rút Tiền (Withdraw)
+
+```
+Step 1: Chọn ngân hàng liên kết + nhập số tiền
+        Quick amount chips: 100K, 200K, 500K, 1M, 2M
+     ↓
+Step 2: Xác nhận (bank, STK, số tiền, phí, trạng thái)
+     ↓
+[Nếu ≥ 100.000đ] → OTP Modal → Nhập OTP
+     ↓
+[POST /transactions/withdraw]
+     ↓
+[TX → PENDING] (chờ admin duyệt)
+     ↓
+Step 3: "Yêu cầu đã gửi" + mã reference
+```
+
+**Admin approval:**
+```
+Admin tab "Rút tiền" → Danh sách PENDING
+     ↓
+[Duyệt] → TX SUCCESS + Email notify user
+[Từ chối] → Hoàn tiền vào ví + TX CANCELLED + Notify
+```
+
+---
+
+## 7. Thanh Toán QR
+
+### Tạo QR Nhận Tiền
+```
+Nhập số tiền cố định (tùy chọn)
+     ↓
+[GET /qr/generate?amount=X]
+     ↓
+QR = base64(JSON{payload: {merchantEmail, amount}, sig: HMAC-SHA256})
+     ↓
+Hiển thị QR với logo overlay
+Download SVG / Copy / Share
+```
+
+### Quét QR Thanh Toán
+```
+Camera scan QR HOẶC paste text
+     ↓
+[POST /transactions/qr-payment] {walletId, qrData, amount?}
+     ↓
+Backend: verify HMAC sig → parse merchantEmail
+         → tìm người nhận → MongoDB TX
+         → trừ người gửi + cộng người nhận
+     ↓
+Thành công + số dư mới
+```
+
+---
+
+## 8. Lịch Sử Giao Dịch
+
+```
+Dashboard → "Xem tất cả" → HistoryPage
+     ↓
+Filter theo loại (Tất cả / Chuyển / Nạp / Rút / QR)
+     ↓
+[GET /transactions?page=1&limit=20&type=X]
+     ↓
+Danh sách (skeleton loading → list)
+     ↓
+Click item → Detail Modal (loại, số tiền, trạng thái, mã GD, thời gian)
+Copy mã giao dịch
+```
+
+---
+
+## 9. Admin Dashboard
+
+```
+Login với role=admin → Profile → "Quản trị hệ thống"
+     ↓
+4 tabs:
+```
+
+### Tab Tổng Quan
+- Stats: Người dùng / GD thành công / Rút chờ duyệt
+- Revenue: Tổng nạp vào vs Tổng rút ra
+- Alert banner nếu có pending withdrawals
+
+### Tab Người Dùng
+```
+[GET /admin/users?search=&page=1&limit=15]
+     ↓
+Table: Tên + email | Role | Trạng thái | Ban/Unban
+Search theo tên/email/SĐT
+[POST /admin/users/:id/ban] hoặc [/unban]
+```
+
+### Tab Giao Dịch
+```
+[GET /admin/transactions?type=&status=&page=1]
+     ↓
+Table: Mã GD | Loại | Số tiền | Trạng thái | Thời gian
+Filter theo type và status
+```
+
+### Tab Rút Tiền
+```
+[GET /admin/pending-approval]
+     ↓
+Danh sách cards (số tiền + ref + thời gian)
+[Duyệt] → POST /admin/transactions/:id/approve {approve: true}
+[Từ chối] → POST /admin/transactions/:id/approve {approve: false}
+     ↓
+Notify user qua Socket.IO + (tương lai: email)
+```
+
+---
+
+## 10. OTP Email Template
+
+3 loại email với màu riêng:
+
+| Loại | Màu gradient | Subject |
+|---|---|---|
+| Xác minh email | Xanh dương `#1a56db` | ✅ Xác minh tài khoản HKi Wallet |
+| Reset mật khẩu | Tím `#7e3af2` | 🔐 Đặt lại mật khẩu HKi Wallet |
+| Xác thực GD | Xanh lá `#057a55` | 🔒 Xác thực giao dịch HKi Wallet |
+
+Nội dung email gồm:
+- Header gradient + logo HKi Wallet
+- OTP box: 42px, letter-spacing 10px
+- Info box: hướng dẫn sử dụng
+- Security notice: không chia sẻ OTP
+- Footer: disclaimer
+
+---
+
+## Notes Kỹ Thuật
+
+- **Idempotency**: Transfer dùng `X-Idempotency-Key` header (UUID)
+- **Redis keys**: `txotp:{userId}` (5 min), `rt:{userId}` (7d), `webhook:{ref}` (24h)
+- **MongoDB transactions**: tất cả balance updates trong session
+- **Socket.IO rooms**: `user:{userId}` cho real-time notifications
+- **Audit log**: ghi mọi action quan trọng (TOPUP, WITHDRAW, TRANSFER, APPROVE)

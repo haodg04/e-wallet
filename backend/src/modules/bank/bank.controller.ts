@@ -26,6 +26,11 @@ export class BankController {
     return this.bankService.addAccount(user.userId, body);
   }
 
+  @Post('resolve-recipient')
+  resolveRecipient(@Body() body: { bankCode: string; accountNumber: string }) {
+    return this.bankService.resolveRecipient(body);
+  }
+
   @Get()
   list(@CurrentUser() user: AuthUser) {
     return this.bankService.list(user.userId);

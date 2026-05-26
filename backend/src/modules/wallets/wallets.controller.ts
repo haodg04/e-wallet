@@ -40,6 +40,11 @@ export class WalletsController {
     return this.walletsService.getBalance(user.userId);
   }
 
+  @Post('resolve-recipient')
+  resolveRecipient(@Body() body: { recipient: string }) {
+    return this.walletsService.resolveWalletRecipient(body.recipient);
+  }
+
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post(':id/transfers')
   transfer(

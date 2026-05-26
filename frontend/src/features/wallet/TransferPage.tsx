@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, Navigate } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import api, { unwrap } from '../../shared/services/api';
 import { useToast } from '../../shared/context/ToastContext';
@@ -10,12 +10,12 @@ import { StepBar } from '../../shared/components/ui/StepBar';
 import { Input } from '../../shared/components/ui/Input';
 import { Button } from '../../shared/components/ui/Button';
 import { OtpModal } from '../../shared/components/OtpModal';
-import { IconCheck } from '../../shared/components/ui/Icons';
 import { formatCurrency } from '../../shared/utils/format';
+import { useAppSelector } from '../../app/hooks';
 import styles from './FlowPages.module.css';
 
-const QUICK_AMOUNTS = [50000, 100000, 200000, 500000, 1000000];
-const OTP_THRESHOLD = 5_000_000;
+const QUICK_AMOUNTS = [50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000];
+const OTP_THRESHOLD = 500_000; // OTP khi chuyển từ 500K
 
 type TransferMode = 'wallet' | 'bank';
 
@@ -34,7 +34,12 @@ interface LinkedBank {
 }
 
 export function TransferPage() {
-  const [mode, setMode] = useState<TransferMode>('bank');
+  const user = useAppSelector((s) => s.auth.user);
+  if (user?.role === 'admin') {
+    return <Navigate to="/admin" replace />;
+  }
+
+  const [mode, setMode] = useState<TransferMode>('wallet');
   const [step, setStep] = useState(0);
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
@@ -55,6 +60,8 @@ export function TransferPage() {
     queryKey: ['wallet'],
     queryFn: async () => unwrap<{ id: string; balance: number }>(await api.get('/wallets')),
   });
+
+  const userEmail = useAppSelector((s) => s.auth.user?.email);
 
   const { data: bankCatalog } = useQuery({
     queryKey: ['bank-catalog'],
@@ -137,11 +144,11 @@ export function TransferPage() {
   const footer =
     step === 0 ? (
       <Button onClick={() => setStep(1)} disabled={!canContinue}>
-        Tiếp tục
+        Tiếp tục →
       </Button>
     ) : step === 1 ? (
       <Button onClick={handleConfirm} disabled={loading}>
-        {loading ? 'Đang xử lý...' : 'Xác nhận chuyển'}
+        {loading ? 'Đang xử lý...' : numAmount >= OTP_THRESHOLD ? '🔒 Xác nhận & OTP' : 'Xác nhận chuyển'}
       </Button>
     ) : (
       <Button onClick={() => navigate('/dashboard')}>Về trang chủ</Button>
@@ -149,118 +156,148 @@ export function TransferPage() {
 
   return (
     <SubPageShell title="Chuyển tiền" footer={footer}>
+      {/* Mode tabs */}
       <div className={styles.tabs}>
         <button
           type="button"
-          className={`${styles.tab} ${mode === 'bank' ? styles.tabActive : ''}`}
-          onClick={() => {
-            setMode('bank');
-            setStep(0);
-          }}
+          className={`${styles.tab} ${mode === 'wallet' ? styles.tabActive : ''}`}
+          onClick={() => { setMode('wallet'); setStep(0); }}
         >
-          Ngân hàng
+          🏦 Ví HKi
         </button>
         <button
           type="button"
-          className={`${styles.tab} ${mode === 'wallet' ? styles.tabActive : ''}`}
-          onClick={() => {
-            setMode('wallet');
-            setStep(0);
-          }}
+          className={`${styles.tab} ${mode === 'bank' ? styles.tabActive : ''}`}
+          onClick={() => { setMode('bank'); setStep(0); }}
         >
-          Ví HKi
+          🏛 Ngân hàng
         </button>
       </div>
 
       <StepBar steps={['Nhập liệu', 'Xác nhận', 'Hoàn tất']} current={step} />
 
+      {/* STEP 0 — Wallet */}
       {step === 0 && mode === 'wallet' && (
-        <div className={styles.form}>
-          <Input
-            label="Người nhận (Email hoặc SĐT)"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-            placeholder="user@email.com hoặc 09xx..."
-          />
-          <AmountSection amount={amount} setAmount={setAmount} balance={wallet?.balance} />
-          <Input label="Lời nhắn (tùy chọn)" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <div className={styles.desktopGrid}>
+          <div className={styles.formColumn}>
+            <div className={styles.formSection}>
+              <Input
+                label="Người nhận (Email hoặc SĐT)"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="user@email.com hoặc 09xx..."
+              />
+              <Input
+                label="Lời nhắn (tùy chọn)"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Chuyển tiền ăn trưa..."
+              />
+            </div>
+          </div>
+          <div className={styles.sidebarColumn}>
+            <AmountSection amount={amount} setAmount={setAmount} balance={wallet?.balance} min={1000} />
+          </div>
         </div>
       )}
 
+      {/* STEP 0 — Bank */}
       {step === 0 && mode === 'bank' && (
-        <div className={styles.form}>
-          {linkedBanks && linkedBanks.length > 0 && (
-            <>
-              <label className={styles.amountLabel}>Tài khoản đã lưu</label>
-              {linkedBanks.map((b) => (
-                <button
-                  key={b.id}
-                  type="button"
-                  className={`${styles.bankSelect} ${linkedBankId === b.id ? styles.bankSelectActive : ''}`}
-                  onClick={() => selectLinkedBank(b)}
-                >
-                  <strong>{b.bankName}</strong>
-                  <span>
-                    {b.accountName} · {b.accountNumberMasked}
-                  </span>
-                </button>
-              ))}
-            </>
-          )}
+        <div className={styles.desktopGrid}>
+          <div className={styles.formColumn}>
+            <div className={styles.formSection}>
+              <label className={styles.amountLabel}>Ngân hàng</label>
+              <select
+                className={styles.select}
+                value={bankCode}
+                onChange={(e) => selectCatalogBank(e.target.value)}
+              >
+                <option value="">-- Chọn ngân hàng --</option>
+                {bankCatalog?.map((b) => (
+                  <option key={b.code} value={b.code}>
+                    {b.shortName} ({b.code})
+                  </option>
+                ))}
+              </select>
 
-          <label className={styles.amountLabel}>Ngân hàng</label>
-          <select
-            className={styles.select}
-            value={bankCode}
-            onChange={(e) => selectCatalogBank(e.target.value)}
-          >
-            <option value="">-- Chọn ngân hàng --</option>
-            {bankCatalog?.map((b) => (
-              <option key={b.code} value={b.code}>
-                {b.shortName} ({b.code})
-              </option>
-            ))}
-          </select>
+              {!linkedBankId && (
+                <>
+                  <Input
+                    label="Số tài khoản"
+                    value={accountNumber}
+                    onChange={(e) => setAccountNumber(e.target.value.replace(/\D/g, ''))}
+                    placeholder="Nhập số tài khoản người nhận"
+                  />
+                  <Input
+                    label="Tên chủ tài khoản"
+                    value={accountName}
+                    onChange={(e) => setAccountName(e.target.value)}
+                    placeholder="NGUYEN VAN A"
+                  />
+                </>
+              )}
 
-          {!linkedBankId && (
-            <>
+              {linkedBankId && (
+                <p className={styles.hint}>
+                  Đang chuyển tới tài khoản đã lưu.{' '}
+                  <button type="button" className={styles.linkBtn} onClick={() => setLinkedBankId('')}>
+                    Nhập STK khác
+                  </button>
+                </p>
+              )}
+
               <Input
-                label="Số tài khoản"
-                value={accountNumber}
-                onChange={(e) => setAccountNumber(e.target.value.replace(/\D/g, ''))}
-                placeholder="Nhập số tài khoản người nhận"
+                label="Nội dung chuyển (tùy chọn)"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Thanh toán dịch vụ..."
               />
-              <Input
-                label="Tên chủ tài khoản"
-                value={accountName}
-                onChange={(e) => setAccountName(e.target.value)}
-                placeholder="NGUYEN VAN A"
-              />
-            </>
-          )}
+            </div>
+          </div>
 
-          {linkedBankId && (
-            <p className={styles.hint}>
-              Đang chuyển tới tài khoản đã lưu.{' '}
-              <button type="button" className={styles.linkBtn} onClick={() => setLinkedBankId('')}>
-                Nhập STK khác
-              </button>
-            </p>
-          )}
+          <div className={styles.sidebarColumn}>
+            {linkedBanks && linkedBanks.length > 0 && (
+              <div className={styles.savedBanksSection}>
+                <label className={styles.amountLabel}>Tài khoản đã lưu</label>
+                <div className={styles.savedBanksList}>
+                  {linkedBanks.map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      className={`${styles.bankAccountCard} ${linkedBankId === b.id ? styles.bankAccountCardActive : ''}`}
+                      onClick={() => selectLinkedBank(b)}
+                    >
+                      <div className={styles.bankAccountIcon}>🏦</div>
+                      <div className={styles.bankAccountInfo}>
+                        <div className={styles.bankAccountName}>{b.bankName}</div>
+                        <div className={styles.bankAccountNum}>{b.accountName} · {b.accountNumberMasked}</div>
+                      </div>
+                      {linkedBankId === b.id && <div className={styles.bankAccountCheck}>✓</div>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          <AmountSection amount={amount} setAmount={setAmount} balance={wallet?.balance} min={10000} />
-          <Input label="Nội dung chuyển (tùy chọn)" value={description} onChange={(e) => setDescription(e.target.value)} />
+            <AmountSection amount={amount} setAmount={setAmount} balance={wallet?.balance} min={10000} />
 
-          {!linkedBanks?.length && (
-            <p className={styles.hint}>
-              <Link to="/profile">Lưu tài khoản ngân hàng</Link> để chuyển nhanh lần sau.
-            </p>
-          )}
+            {!linkedBanks?.length && (
+              <p className={styles.hint}>
+                <Link to="/profile">Lưu tài khoản ngân hàng</Link> để chuyển nhanh lần sau.
+              </p>
+            )}
+          </div>
         </div>
       )}
 
+      {/* STEP 1 — Confirm */}
       {step === 1 && (
         <div className={styles.confirmCard}>
+          <div className={styles.confirmCardHeader}>
+            <div className={styles.confirmAmountLabel}>Số tiền chuyển</div>
+            <div className={styles.confirmAmount}>{formatCurrency(numAmount)}</div>
+          </div>
+
           {mode === 'wallet' ? (
             <div className={styles.confirmRow}>
               <span>Người nhận</span>
@@ -274,7 +311,11 @@ export function TransferPage() {
               </div>
               <div className={styles.confirmRow}>
                 <span>Số tài khoản</span>
-                <strong>{linkedBankId ? linkedBanks?.find((b) => b.id === linkedBankId)?.accountNumberMasked : accountNumber}</strong>
+                <strong>
+                  {linkedBankId
+                    ? linkedBanks?.find((b) => b.id === linkedBankId)?.accountNumberMasked
+                    : accountNumber}
+                </strong>
               </div>
               <div className={styles.confirmRow}>
                 <span>Chủ tài khoản</span>
@@ -282,29 +323,38 @@ export function TransferPage() {
               </div>
             </>
           )}
-          <div className={styles.confirmRow}>
-            <span>Số tiền</span>
-            <strong className={styles.amountHighlight}>{formatCurrency(numAmount)}</strong>
-          </div>
           {description && (
             <div className={styles.confirmRow}>
               <span>Nội dung</span>
               <strong>{description}</strong>
             </div>
           )}
+          <div className={styles.confirmRow}>
+            <span>Phí giao dịch</span>
+            <strong style={{ color: 'var(--color-success)' }}>Miễn phí</strong>
+          </div>
+
           {numAmount >= OTP_THRESHOLD && (
-            <p className={styles.otpWarning}>Giao dịch lớn — cần xác thực OTP qua email</p>
+            <div className={styles.otpWarning}>
+              <span className={styles.otpWarningIcon}>🔒</span>
+              Giao dịch sẽ yêu cầu xác thực OTP qua email
+            </div>
           )}
         </div>
       )}
 
+      {/* STEP 2 — Success */}
       {step === 2 && (
         <div className={styles.success}>
-          <IconCheck />
+          <div className={styles.successIcon}>✓</div>
           <h2>Chuyển tiền thành công!</h2>
-          <p>Mã giao dịch</p>
+          <p>Giao dịch đã được xử lý</p>
           <code className={styles.refCode}>{reference}</code>
-          {mode === 'bank' && <p className={styles.hint}>Chuyển ngân hàng đang được xử lý (1–2 ngày làm việc).</p>}
+          {mode === 'bank' && (
+            <p className={styles.hint} style={{ marginTop: 12 }}>
+              Chuyển ngân hàng đang được xử lý (1–2 ngày làm việc).
+            </p>
+          )}
         </div>
       )}
 
@@ -313,7 +363,8 @@ export function TransferPage() {
         onClose={() => setOtpOpen(false)}
         onVerified={executeTransfer}
         transactionOtp
-        title="OTP giao dịch"
+        userEmail={userEmail}
+        title="Xác thực OTP giao dịch"
       />
     </SubPageShell>
   );
@@ -334,23 +385,26 @@ function AmountSection({
     <>
       <div className={styles.amountSection}>
         <label className={styles.amountLabel}>Số tiền</label>
-        <input
-          className={styles.amountInput}
-          type="number"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          placeholder="0"
-          min={min}
-        />
+        <div className={styles.amountInputWrapper}>
+          <span className={styles.amountCurrency}>₫</span>
+          <input
+            className={styles.amountInput}
+            type="number"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="0"
+            min={min}
+          />
+        </div>
         <div className={styles.quickAmounts}>
           {QUICK_AMOUNTS.map((a) => (
             <button key={a} type="button" className={styles.chip} onClick={() => setAmount(String(a))}>
-              {(a / 1000).toFixed(0)}K
+              {a >= 1_000_000 ? `${a / 1_000_000}M` : `${a / 1000}K`}
             </button>
           ))}
         </div>
       </div>
-      <p className={styles.hint}>Số dư khả dụng: {formatCurrency(balance ?? 0)}</p>
+      <p className={styles.hint}>💰 Số dư khả dụng: <strong>{formatCurrency(balance ?? 0)}</strong></p>
     </>
   );
 }

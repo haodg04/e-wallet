@@ -22,6 +22,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AuditLog, AuditLogDocument } from '../../common/schemas/audit-log.schema';
 import { BankService } from '../bank/bank.service';
 import { AuthService } from '../auth/auth.service';
+import { MailerService } from '../../common/mailer/mailer.service';
 
 @Injectable()
 export class TransactionsService {
@@ -36,6 +37,7 @@ export class TransactionsService {
     private notificationsService: NotificationsService,
     private bankService: BankService,
     private authService: AuthService,
+    private mailerService: MailerService,
   ) {}
 
   async getHistory(userId: string, page = 1, limit = 20, type?: string, status?: string) {
@@ -62,6 +64,16 @@ export class TransactionsService {
   }
 
   async createTopup(userId: string, dto: TopupDto) {
+    // Check bank account constraint
+    const hasBankAccount = await this.bankService.hasActiveBankAccount(userId);
+    if (!hasBankAccount) {
+      throw new BusinessException(
+        'Bạn cần liên kết tài khoản ngân hàng trước khi nạp tiền. Vào Cá nhân > Liên kết ngân hàng.',
+        ErrorCodes.VALIDATION_ERROR,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
     const wallet = await this.walletModel.findOne({ userId: new Types.ObjectId(userId), isActive: true });
     if (!wallet) {
       throw new BusinessException('Không tìm thấy ví', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
@@ -119,10 +131,24 @@ export class TransactionsService {
       await this.redisService.set(idemKey, '1', 86400);
 
       const wallet = await this.walletModel.findById(tx.toWalletId);
-      const userId = tx.userId.toString();
-      this.notificationGateway.emitBalanceUpdated(userId, wallet?.balance ?? 0);
-      await this.notificationsService.create(userId, 'Nạp tiền thành công', `Số dư +${amount.toLocaleString('vi-VN')}đ`, 'topup');
+      const txUserId = tx.userId.toString();
+      this.notificationGateway.emitBalanceUpdated(txUserId, wallet?.balance ?? 0);
+      await this.notificationsService.create(txUserId, 'Nạp tiền thành công', `Số dư +${amount.toLocaleString('vi-VN')}đ`, 'topup');
       await this.auditModel.create({ userId: tx.userId, action: 'TOPUP_SUCCESS', resource: 'transaction', metadata: { reference } });
+
+      // Send email receipt
+      const userForEmail = await this.userModel.findById(tx.userId);
+      if (userForEmail) {
+        void this.mailerService.sendTransactionEmail({
+          to: userForEmail.email,
+          type: 'topup',
+          amount,
+          reference,
+          newBalance: wallet?.balance,
+          date: new Date(),
+        });
+      }
+
       return { message: 'Nạp tiền thành công', reference };
     } catch (e) {
       await session.abortTransaction();
@@ -133,7 +159,17 @@ export class TransactionsService {
   }
 
   async createBankTransfer(userId: string, dto: BankTransferDto) {
-    await this.authService.assertTransactionOtp(userId, dto.amount, dto.otpCode);
+    // Check bank account constraint
+    const hasBankAccount = await this.bankService.hasActiveBankAccount(userId);
+    if (!hasBankAccount) {
+      throw new BusinessException(
+        'Bạn cần liên kết tài khoản ngân hàng trước khi chuyển khoản. Vào Cá nhân > Liên kết ngân hàng.',
+        ErrorCodes.VALIDATION_ERROR,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    await this.authService.assertTransactionOtp(userId, dto.amount, 500000, dto.otpCode);
 
     const wallet = await this.walletModel.findOne({ userId: new Types.ObjectId(userId), isActive: true });
     if (!wallet) {
@@ -179,6 +215,22 @@ export class TransactionsService {
         `Đang xử lý chuyển ${dto.amount.toLocaleString('vi-VN')}đ tới ${bank.bankName}`,
         'transfer',
       );
+
+      // Send email receipt
+      const senderUser = await this.userModel.findById(userId);
+      if (senderUser) {
+        void this.mailerService.sendTransactionEmail({
+          to: senderUser.email,
+          type: 'transfer_out',
+          amount: dto.amount,
+          reference,
+          recipientName: bank.accountName,
+          description: dto.description,
+          newBalance: updated?.balance,
+          date: new Date(),
+        });
+      }
+
       return {
         transactionId: tx._id,
         reference,
@@ -197,6 +249,18 @@ export class TransactionsService {
   }
 
   async createWithdraw(userId: string, dto: WithdrawDto) {
+    // Check bank account constraint
+    const hasBankAccount = await this.bankService.hasActiveBankAccount(userId);
+    if (!hasBankAccount) {
+      throw new BusinessException(
+        'Bạn cần liên kết tài khoản ngân hàng trước khi rút tiền. Vào Cá nhân > Liên kết ngân hàng.',
+        ErrorCodes.VALIDATION_ERROR,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    await this.authService.assertTransactionOtp(userId, dto.amount, 100000, dto.otpCode);
+
     const wallet = await this.walletModel.findOne({ userId: new Types.ObjectId(userId), isActive: true });
     if (!wallet) {
       throw new BusinessException('Không tìm thấy ví', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
@@ -225,7 +289,22 @@ export class TransactionsService {
         { session },
       );
       await session.commitTransaction();
+      const updatedWallet = await this.walletModel.findById(wallet._id);
       await this.auditModel.create({ userId: wallet.userId, action: 'WITHDRAW_REQUEST', resource: 'transaction', metadata: { reference } });
+
+      // Send email receipt
+      const withdrawUser = await this.userModel.findById(userId);
+      if (withdrawUser) {
+        void this.mailerService.sendTransactionEmail({
+          to: withdrawUser.email,
+          type: 'withdraw',
+          amount: dto.amount,
+          reference,
+          newBalance: updatedWallet?.balance,
+          date: new Date(),
+        });
+      }
+
       return { transactionId: tx._id, reference, amount: dto.amount, status: 'PENDING' };
     } catch (e) {
       await session.abortTransaction();
@@ -282,7 +361,17 @@ export class TransactionsService {
     return { message: approve ? 'Đã duyệt rút tiền' : 'Đã từ chối và hoàn tiền' };
   }
 
-  async qrPayment(userId: string, walletId: string, qrData: string, amount?: number) {
+  async qrPayment(userId: string, walletId: string, qrData: string, amount?: number, otpCode?: string) {
+    // Check bank account constraint
+    const hasBankAccount = await this.bankService.hasActiveBankAccount(userId);
+    if (!hasBankAccount) {
+      throw new BusinessException(
+        'Bạn cần liên kết tài khoản ngân hàng trước khi thanh toán QR. Vào Cá nhân > Liên kết ngân hàng.',
+        ErrorCodes.VALIDATION_ERROR,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
     const parsed = this.parseQr(qrData);
     const payAmount = amount ?? parsed.amount;
     if (!payAmount || payAmount < 1000) {
@@ -293,13 +382,22 @@ export class TransactionsService {
     if (!fromWallet) throw new BusinessException('Không tìm thấy ví', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
 
     const recipient = await this.userModel.findOne({ email: parsed.merchantEmail?.toLowerCase() });
-    if (!recipient) throw new BusinessException('QR không hợp lệ', ErrorCodes.INVALID_QR);
+    if (!recipient) throw new BusinessException('Người nhận QR không tồn tại', ErrorCodes.INVALID_QR);
+    if (!recipient.isActive) {
+      throw new BusinessException('Tài khoản nhận đang bị khóa', ErrorCodes.VALIDATION_ERROR);
+    }
+    if (recipient._id.equals(fromWallet.userId)) {
+      throw new BusinessException('Không thể tự thanh toán hoặc chuyển tiền cho chính mình', ErrorCodes.VALIDATION_ERROR);
+    }
 
     const toWallet = await this.walletModel.findOne({ userId: recipient._id });
-    if (!toWallet) throw new BusinessException('Ví merchant không tồn tại', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
+    if (!toWallet) throw new BusinessException('Ví người nhận không tồn tại', ErrorCodes.WALLET_NOT_FOUND, HttpStatus.NOT_FOUND);
     if (fromWallet.balance < payAmount) {
       throw new BusinessException('Số dư không đủ', ErrorCodes.INSUFFICIENT_BALANCE);
     }
+
+    // Assert transaction OTP if necessary
+    await this.authService.assertTransactionOtp(userId, payAmount, 500000, otpCode);
 
     const reference = `QR-${uuidv4()}`;
     const session = await this.connection.startSession();
@@ -324,7 +422,49 @@ export class TransactionsService {
       );
       await session.commitTransaction();
       const updated = await this.walletModel.findById(fromWallet._id);
+      const recipientUpdated = await this.walletModel.findById(toWallet._id);
+      
       this.notificationGateway.emitBalanceUpdated(userId, updated?.balance ?? 0);
+      this.notificationGateway.emitBalanceUpdated(recipient._id.toString(), recipientUpdated?.balance ?? 0);
+      
+      await this.notificationsService.create(
+        userId,
+        'Thanh toán QR thành công',
+        `Bạn đã thanh toán ${payAmount.toLocaleString('vi-VN')}đ cho ${recipient.fullName}`,
+        'transfer',
+      );
+      await this.notificationsService.create(
+        recipient._id.toString(),
+        'Nhận tiền từ QR',
+        `Bạn nhận được ${payAmount.toLocaleString('vi-VN')}đ thanh toán`,
+        'transfer',
+      );
+
+      // Send email receipts
+      const senderUserInfo = await this.userModel.findById(userId);
+      if (senderUserInfo) {
+        void this.mailerService.sendTransactionEmail({
+          to: senderUserInfo.email,
+          type: 'qr_payment',
+          amount: payAmount,
+          reference,
+          recipientName: recipient.fullName,
+          recipientEmail: recipient.email,
+          newBalance: updated?.balance,
+          date: new Date(),
+        });
+      }
+      void this.mailerService.sendTransactionEmail({
+        to: recipient.email,
+        type: 'transfer_in',
+        amount: payAmount,
+        reference,
+        senderName: senderUserInfo?.fullName,
+        senderEmail: senderUserInfo?.email,
+        newBalance: recipientUpdated?.balance,
+        date: new Date(),
+      });
+
       return { transactionId: tx._id, reference, amount: payAmount, newBalance: updated?.balance };
     } catch (e) {
       await session.abortTransaction();
